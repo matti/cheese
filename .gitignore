@@ -9,3 +9,6 @@
 *.jsonl
 *.jsonl.gz
 .agent-v12/capsule.md
+.agent-v12/index.db
+.agent-v12/index.db-wal
+.agent-v12/index.db-shm

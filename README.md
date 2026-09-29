@@ -12,6 +12,7 @@ screen updates. No sudo, server, browser, or background daemon.
 ./battery report recordings/session-….jsonl.gz
 ./battery sessions
 ./battery inspect 12345           # 3-second stack sample of a chosen process
+./battery wtf                     # measure heat/load, ask Codex (or Claude), exit
 ```
 
 Requires an Apple Silicon Mac, Xcode Command Line Tools and Rust (edition 2024).
@@ -19,6 +20,59 @@ Tested on Apple M5 Pro / macOS 26. The launcher builds an optimized binary into
 `target/release/battery`; `cargo install --path .` also works. With the launcher,
 relative paths are relative to this repository; an installed binary uses your
 current directory. `--dir PATH` changes the recording directory.
+
+`battery wtf` uses a ChatGPT subscription login through the `codex` CLI
+(`codex login`). If Codex is unavailable, not signed in with ChatGPT, or fails,
+it automatically uses `klaude --print` when the `klaude` account manager is on
+`PATH`, otherwise `claude --print`. Both the login check and analysis go through
+the same command, so existing klaude subscription accounts work without another
+login. Klaude runs without an account menu and selects its active automatic
+account; battery disables klaude's daemon auto-setup. Plain Claude uses its own
+subscription login. At least one CLI must be installed and signed in.
+It samples for 5 seconds, captures process load and macOS power status, then
+automatically deep-inspects up to three busy processes in parallel. This uses
+measured interval CPU (including system processes from `top`) and keeps a busy
+VM in scope. VM probes reuse `battery inspect`'s disk-based identification,
+container/Compose metrics and guest Linux process sampling. Other processes get
+a one-second stack sample plus their command and parent process context.
+Detailed VM JSON and stack reports are saved beside the measurement. These
+bounded probes can add time beyond the five-second observation; the UI shows
+the inspection stage. Exited/reused PIDs, permission failures and unsupported
+VMs are reported as unavailable rather than guessed. The assistant then
+produces an English explanation limited in the prompt to 70 words: the main
+cause, up to three consumers and one action. Use
+`battery wtf --seconds 30` for a longer observation. The final answer goes
+to a compact, colorful terminal panel: live temperature, power and battery cards,
+an animated progress indicator, then the formatted diagnosis. It exits automatically
+and leaves the result in terminal scrollback. When redirected (or with `NO_COLOR`),
+the answer is plain text on stdout, with a few status lines on stderr.
+Codex/Claude hooks, retries and other diagnostics are saved to `analyze-*.codex.log`
+and `analyze-*.claude.log` beside the evidence, rather than printed on screen.
+It exits successfully when either CLI produces an
+answer and reports failure if neither works. Interrupting an analysis cancels it
+without starting a fallback. Both attempts reuse the same measurements.
+API-key environment overrides are removed from the child processes. Codex is
+restricted to ChatGPT login and its OpenAI provider; Claude uses claude.ai login
+with settings-based API credentials disabled. Codex runs with a read-only sandbox;
+Claude interprets the captured evidence with tools disabled. Neither asks for
+approval or changes workloads or settings.
+
+Existing `CODEX_HOME` and `CLAUDE_CONFIG_DIR` are respected. For custom login
+profiles that should work from every terminal, optionally save their paths in
+`~/.config/battery/config.json` (`$XDG_CONFIG_HOME/battery/config.json` if set):
+
+```json
+{"codex_home": "/absolute/path/to/codex-profile", "claude_config_dir": "/absolute/path/to/claude-profile"}
+```
+
+Either field can be omitted. Explicit environment variables take precedence.
+This file stores paths only; credentials stay in the CLIs' own stores.
+
+Evidence and the prompt are saved as `recordings/analyze-*.txt` (or under
+`battery --dir PATH wtf`). Unlike ordinary local recordings, this evidence
+is sent through Codex, or Claude on fallback. It includes process names, command
+arguments, paths, sensor readings and sleep assertions. The short observation
+supports a current-load diagnosis, not proof of how long a workload has been hot.
 
 ## How to actually find the drain
 
@@ -112,11 +166,12 @@ cargo build --release
 ```
 
 The low-level sampler modules, shared types and host helpers were adapted from
-Matti Paksula's MIT-licensed `~/dev/power`, revision
+Matti Paksula's MIT-licensed [power](https://github.com/matti/power), revision
 `234179c8084d1ad222a6c1c451f5f191e5af7e4e`. They are included here so the tool does
 not depend on a sibling checkout. Recording, interval accounting, experiments,
-reports and UI are separate. The grouping approach also follows `~/dev/memtop`.
-The IOReport bindings in `power` derive from the MIT-licensed macmon bindings.
+reports and UI are separate. The grouping approach also follows
+[memtop](https://github.com/matti/memtop). The IOReport bindings in `power` derive
+from the MIT-licensed [macmon](https://github.com/vladkens/macmon) bindings.
 
 CPU-energy semantics: [Apple XNU Recount documentation](https://github.com/apple-oss-distributions/xnu/blob/main/doc/observability/recount.md).
 Private IOReport/SMC interfaces and the inherited `kinfo_proc` layout can change;

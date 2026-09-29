@@ -2,6 +2,9 @@
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 compile_error!("battery currently supports Apple Silicon macOS only");
 mod analysis;
+mod analyze;
+mod assistant;
+mod deep;
 mod host;
 mod record;
 mod sampler;
@@ -13,6 +16,7 @@ mod tests;
 mod types;
 mod ui;
 mod vm;
+mod wtf_ui;
 
 use crate::{
     analysis::Ledger,
@@ -51,6 +55,12 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Measure current heat/load, ask Codex (or Claude), then exit
+    Wtf {
+        /// Seconds to observe before asking Codex
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(2..=120))]
+        seconds: u64,
+    },
     /// Summarize a recording (latest recording if omitted)
     Report { file: Option<PathBuf> },
     /// List recordings
@@ -78,6 +88,7 @@ fn main() {
 fn run() -> io::Result<()> {
     let args = Args::parse();
     match &args.command {
+        Some(Action::Wtf { seconds }) => return analyze::run(&args.dir, *seconds),
         Some(Action::Report { file }) => {
             let path = file
                 .clone()

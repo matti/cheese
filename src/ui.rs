@@ -512,6 +512,28 @@ fn draw_vm(f: &mut Frame, ledger: &Ledger, path: &Path, view: &mut View) {
         f.render_widget(Paragraph::new("Esc back · q stop recording"), areas[4]);
         return;
     };
+    if vm.identity.is_none() {
+        f.render_widget(
+            Paragraph::new("VM identification failed · retrying 15s after each completed probe")
+                .style(Style::default().fg(Color::Yellow)),
+            areas[1],
+        );
+        let mut errors = vec![Line::from(
+            "Container and Linux process metrics are unavailable until the VM is identified.",
+        )];
+        errors.extend(vm.errors.iter().map(|e| Line::from(clean(e))));
+        f.render_widget(
+            Paragraph::new(errors)
+                .wrap(Wrap { trim: false })
+                .block(panel(" VM probe unavailable ")),
+            areas[2],
+        );
+        f.render_widget(
+            Paragraph::new("d retry · Esc back · q stop recording\nHost recording continues."),
+            areas[4],
+        );
+        return;
+    }
     let identity = vm
         .identity
         .as_ref()

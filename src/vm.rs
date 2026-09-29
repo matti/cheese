@@ -146,6 +146,22 @@ pub fn identify(files: &str) -> Option<Identity> {
 fn execute(c: &mut Command, timeout: u64) -> io::Result<String> {
     bounded_command(c, Duration::from_secs(timeout))
 }
+
+fn open_files(pid: i32) -> io::Result<String> {
+    // A busy VM can hold hundreds of thousands of shared guest files open.
+    // Enumerating them can exceed the shorter Docker/guest sample deadline.
+    // Keep the complete scan: truncating it could hide a second VM's disks.
+    execute(
+        Command::new("/usr/sbin/lsof").args(["-nP", "-a", "-p", &pid.to_string(), "-Fn"]),
+        30,
+    )
+    .map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("VM identification: open-file lookup for PID {pid} (30s limit): {e}"),
+        )
+    })
+}
 fn docker(socket: &std::path::Path) -> Command {
     let mut c = Command::new("docker");
     c.env_remove("DOCKER_CONTEXT")
@@ -261,10 +277,7 @@ pub fn inspect(pid: i32, expected_start: Option<u64>) -> Inspection {
     }
     result.start_abstime = actual;
     let work = || -> io::Result<Identity> {
-        let files = execute(
-            Command::new("/usr/sbin/lsof").args(["-nP", "-a", "-p", &pid.to_string(), "-Fn"]),
-            8,
-        )?;
+        let files = open_files(pid)?;
         identify(&files).ok_or_else(||io::Error::other("Could not uniquely identify this VM from its open disk files; no default Docker context was queried"))
     };
     match work() {
