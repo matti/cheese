@@ -1,2 +1,2 @@
 #!/bin/sh
-exec "$(dirname "$0")/cheese" "$@"
+exec "$(dirname "$(realpath "$0")")/cheese" "$@"
