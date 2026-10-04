@@ -22,15 +22,23 @@ pub struct Target {
     source: &'static str,
 }
 
+/// Mean CPU of one process over the observation window (100 = one core).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Load {
+    pub cpu_percent: f64,
+    pub intervals: usize,
+    pub source: &'static str,
+}
+
 #[derive(Default)]
 pub struct Consumers {
-    latest: HashMap<i32, ProcRow>,
+    latest: Vec<ProcRow>,
     cpu: HashMap<(i32, Option<u64>), (f64, f64, usize)>,
 }
 
 impl Consumers {
     pub fn observe(&mut self, sample: &Sample) {
-        self.latest = sample.procs.iter().map(|p| (p.pid, p.clone())).collect();
+        self.latest = sample.procs.clone();
         for p in &sample.procs {
             if let Some(cpu) = p.cpu_percent.filter(|c| c.is_finite() && *c >= 0.) {
                 let entry = self.cpu.entry((p.pid, p.start_abstime)).or_default();
@@ -41,63 +49,61 @@ impl Consumers {
         }
     }
 
-    pub fn targets(&self, top: &str) -> Vec<Target> {
-        // top can read system processes whose native counters are unavailable.
-        // Discard its first (non-interval) sample; never overwrite native data.
-        let mut top_cpu: HashMap<i32, (f64, usize)> = HashMap::new();
-        let mut interval = 0;
-        for line in top.lines() {
-            let mut fields = line.split_whitespace();
-            let Some(pid) = fields.next() else { continue };
-            if pid == "PID" {
-                interval += 1;
-                continue;
-            }
-            if interval < 2 {
-                continue;
-            }
-            let Ok(pid) = pid.parse::<i32>() else {
-                continue;
-            };
-            let Some(cpu) = fields.nth(1).and_then(|s| s.parse::<f64>().ok()) else {
-                continue;
-            };
-            if cpu.is_finite() && cpu >= 0. {
-                let entry = top_cpu.entry(pid).or_default();
-                entry.0 += cpu;
-                entry.1 += 1;
-            }
-        }
-        let mut targets = Vec::new();
-        for p in self.latest.values() {
-            if p.pid == std::process::id() as i32 || p.pid <= 0 {
-                continue;
-            }
-            let measured = self
-                .cpu
-                .get(&(p.pid, p.start_abstime))
-                .filter(|(_, seconds, _)| *seconds > 0.);
-            let (cpu, intervals, source) = if let Some((total, seconds, count)) = measured {
-                (total / seconds, *count, "native interval CPU")
-            } else if let Some((total, count)) = top_cpu.get(&p.pid) {
-                (total / *count as f64, *count, "top interval CPU")
-            } else {
-                continue;
-            };
-            if cpu < 10. {
-                continue;
-            }
-            targets.push(Target {
-                pid: p.pid,
-                start_abstime: p.start_abstime,
-                name: p.name.clone(),
-                executable: p.executable.clone(),
-                ppid: p.ppid,
-                mean_cpu_percent: cpu,
-                observed_intervals: intervals,
-                source,
-            });
-        }
+    /// Processes present in the most recent sample.
+    pub fn latest(&self) -> &[ProcRow] {
+        &self.latest
+    }
+
+    /// Time-weighted native CPU per process, falling back to `top`'s interval
+    /// samples for processes whose counters are unreadable (other users).
+    pub fn loads(&self, top: &str) -> HashMap<i32, Load> {
+        let top_cpu = top_interval_cpu(top);
+        self.latest
+            .iter()
+            .filter(|p| p.pid > 0)
+            .filter_map(|p| {
+                let measured = self
+                    .cpu
+                    .get(&(p.pid, p.start_abstime))
+                    .filter(|(_, seconds, _)| *seconds > 0.);
+                let load = if let Some((total, seconds, count)) = measured {
+                    Load {
+                        cpu_percent: total / seconds,
+                        intervals: *count,
+                        source: "native interval CPU",
+                    }
+                } else {
+                    let (total, count) = top_cpu.get(&p.pid)?;
+                    Load {
+                        cpu_percent: total / *count as f64,
+                        intervals: *count,
+                        source: "top interval CPU",
+                    }
+                };
+                Some((p.pid, load))
+            })
+            .collect()
+    }
+
+    pub fn targets(&self, loads: &HashMap<i32, Load>) -> Vec<Target> {
+        let mut targets: Vec<Target> = self
+            .latest
+            .iter()
+            .filter(|p| p.pid != std::process::id() as i32)
+            .filter_map(|p| {
+                let load = loads.get(&p.pid).filter(|l| l.cpu_percent >= 10.)?;
+                Some(Target {
+                    pid: p.pid,
+                    start_abstime: p.start_abstime,
+                    name: p.name.clone(),
+                    executable: p.executable.clone(),
+                    ppid: p.ppid,
+                    mean_cpu_percent: load.cpu_percent,
+                    observed_intervals: load.intervals,
+                    source: load.source,
+                })
+            })
+            .collect();
         targets.sort_by(|a, b| {
             b.mean_cpu_percent
                 .total_cmp(&a.mean_cpu_percent)
@@ -119,6 +125,36 @@ impl Consumers {
         }
         targets
     }
+}
+
+/// top can read system processes whose native counters are unavailable.
+/// Discard its first (non-interval) sample; sum the rest per pid.
+fn top_interval_cpu(top: &str) -> HashMap<i32, (f64, usize)> {
+    let mut top_cpu: HashMap<i32, (f64, usize)> = HashMap::new();
+    let mut interval = 0;
+    for line in top.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(pid) = fields.next() else { continue };
+        if pid == "PID" {
+            interval += 1;
+            continue;
+        }
+        if interval < 2 {
+            continue;
+        }
+        let Ok(pid) = pid.parse::<i32>() else {
+            continue;
+        };
+        let Some(cpu) = fields.nth(1).and_then(|s| s.parse::<f64>().ok()) else {
+            continue;
+        };
+        if cpu.is_finite() && cpu >= 0. {
+            let entry = top_cpu.entry(pid).or_default();
+            entry.0 += cpu;
+            entry.1 += 1;
+        }
+    }
+    top_cpu
 }
 
 pub fn inspect(
@@ -260,7 +296,7 @@ mod tests {
                 row(2, "busy", Some(100.)),
                 row(3, "VirtualMachine", Some(40.)),
                 row(4, "other", Some(90.)),
-                row(std::process::id() as i32, "battery", Some(999.)),
+                row(std::process::id() as i32, "cheese", Some(999.)),
             ],
             1,
         ));
@@ -270,11 +306,11 @@ mod tests {
                 row(2, "busy", Some(100.)),
                 row(3, "VirtualMachine", Some(40.)),
                 row(4, "other", Some(90.)),
-                row(std::process::id() as i32, "battery", Some(999.)),
+                row(std::process::id() as i32, "cheese", Some(999.)),
             ],
             4,
         ));
-        let targets = c.targets("");
+        let targets = c.targets(&c.loads(""));
         assert_eq!(
             targets.iter().map(|t| t.pid).collect::<Vec<_>>(),
             vec![2, 4, 3]
@@ -288,7 +324,9 @@ mod tests {
             vec![row(1, "system", None), row(2, "native", Some(20.))],
             2,
         ));
-        let targets=c.targets("PID COMMAND %CPU\n1 system 900\n2 native 900\nPID COMMAND %CPU\n1 system 80\n2 native 800\nPID COMMAND %CPU\n1 system 100");
+        let targets = c.targets(&c.loads(
+            "PID COMMAND %CPU\n1 system 900\n2 native 900\nPID COMMAND %CPU\n1 system 80\n2 native 800\nPID COMMAND %CPU\n1 system 100",
+        ));
         assert_eq!(targets[0].mean_cpu_percent, 90.);
         assert_eq!(targets[1].mean_cpu_percent, 20.);
     }
@@ -299,7 +337,7 @@ mod tests {
         let mut new = row(1, "new", Some(0.));
         new.start_abstime = Some(999);
         c.observe(&sample(vec![new], 2));
-        assert!(c.targets("").is_empty());
+        assert!(c.targets(&c.loads("")).is_empty());
     }
     #[test]
     fn stack_excerpt_keeps_leaf_summary_but_omits_binary_inventory() {

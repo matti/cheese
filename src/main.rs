@@ -1,15 +1,18 @@
 #![cfg_attr(not(all(target_os = "macos", target_arch = "aarch64")), allow(unused))]
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-compile_error!("battery currently supports Apple Silicon macOS only");
+compile_error!("cheese currently supports Apple Silicon macOS only");
 mod analysis;
 mod analyze;
 mod assistant;
 mod deep;
 mod host;
+mod origin;
 mod record;
 mod sampler;
 #[allow(dead_code)]
 mod samplers;
+mod signals;
+mod system;
 #[cfg(test)]
 mod tests;
 #[allow(dead_code)]
@@ -36,11 +39,30 @@ use std::{
 #[derive(Parser)]
 #[command(
     version,
-    about = "Record where your Mac's battery goes. Starts recording immediately; no sudo."
+    about = "Why is my Mac cheesed? Diagnose a slow, hot or draining Mac in seconds, or record where the battery goes. No sudo.",
+    long_about = None
 )]
 struct Args {
     #[command(subcommand)]
     command: Option<Action>,
+    #[command(flatten)]
+    diagnose: Diagnose,
+    /// Directory for recordings and diagnosis evidence
+    #[arg(long, global = true, default_value = "recordings")]
+    dir: PathBuf,
+}
+
+/// Options of the default action: measure, inspect, then ask Codex (or Claude).
+#[derive(clap::Args)]
+struct Diagnose {
+    /// Seconds to observe before asking Codex (or Claude) [default: 5]
+    #[arg(long, value_parser = clap::value_parser!(u64).range(2..=120))]
+    seconds: Option<u64>,
+}
+const DEFAULT_SECONDS: u64 = 5;
+
+#[derive(clap::Args)]
+struct RecordArgs {
     /// Seconds between samples
     #[arg(short, long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..=60))]
     interval: u64,
@@ -50,17 +72,14 @@ struct Args {
     /// Record without the terminal dashboard
     #[arg(long)]
     headless: bool,
-    #[arg(long, default_value = "recordings")]
-    dir: PathBuf,
 }
+
 #[derive(Subcommand)]
 enum Action {
-    /// Measure current heat/load, ask Codex (or Claude), then exit
-    Wtf {
-        /// Seconds to observe before asking Codex
-        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(2..=120))]
-        seconds: u64,
-    },
+    /// Diagnose now (the default when no subcommand is given)
+    Wtf(Diagnose),
+    /// Record battery drain and CPU energy in a live terminal view
+    Record(RecordArgs),
     /// Summarize a recording (latest recording if omitted)
     Report { file: Option<PathBuf> },
     /// List recordings
@@ -81,14 +100,26 @@ extern "C" fn stop_signal(_: libc::c_int) {
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("battery: {e}");
+        eprintln!("cheese: {e}");
         std::process::exit(1);
     }
 }
 fn run() -> io::Result<()> {
     let args = Args::parse();
     match &args.command {
-        Some(Action::Wtf { seconds }) => return analyze::run(&args.dir, *seconds),
+        None => analyze::run(&args.dir, args.diagnose.seconds.unwrap_or(DEFAULT_SECONDS)),
+        Some(Action::Wtf(diagnose)) => analyze::run(
+            &args.dir,
+            diagnose
+                .seconds
+                .or(args.diagnose.seconds)
+                .unwrap_or(DEFAULT_SECONDS),
+        ),
+        Some(_) if args.diagnose.seconds.is_some() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--seconds before a subcommand applies only to the diagnosis; put it after the subcommand",
+        )),
+        Some(Action::Record(options)) => record_session(&args.dir, options),
         Some(Action::Report { file }) => {
             let path = file
                 .clone()
@@ -97,7 +128,7 @@ fn run() -> io::Result<()> {
             let mut ledger = Ledger::default();
             record::read(&path, |r| ledger.apply(&r))?;
             println!("{}\n{}", path.display(), ledger.report());
-            return Ok(());
+            Ok(())
         }
         Some(Action::Sessions) => {
             let mut files: Vec<_> = std::fs::read_dir(&args.dir)?
@@ -109,7 +140,7 @@ fn run() -> io::Result<()> {
             for p in files {
                 println!("{}", p.display());
             }
-            return Ok(());
+            Ok(())
         }
         Some(Action::Inspect { pid, seconds }) => {
             let path = samplers::procname::pidpath(*pid);
@@ -135,10 +166,12 @@ fn run() -> io::Result<()> {
                 Duration::from_secs(seconds + 15),
             )?;
             println!("{output}\nStack sample: {}", path.display());
-            return Ok(());
+            Ok(())
         }
-        None => {}
     }
+}
+
+fn record_session(dir: &std::path::Path, args: &RecordArgs) -> io::Result<()> {
     unsafe {
         libc::signal(libc::SIGINT, stop_signal as *const () as libc::sighandler_t);
         libc::signal(
@@ -146,7 +179,7 @@ fn run() -> io::Result<()> {
             stop_signal as *const () as libc::sighandler_t,
         );
     }
-    let mut recorder = Recorder::new(&args.dir, args.interval as f64)?;
+    let mut recorder = Recorder::new(dir, args.interval as f64)?;
     let mut ledger = Ledger {
         recorder_pid: std::process::id(),
         ..Default::default()

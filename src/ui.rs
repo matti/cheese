@@ -183,7 +183,7 @@ pub fn draw(f: &mut Frame, ledger: &Ledger, path: &Path, view: &mut View) {
             Line::from(vec![
                 Span::styled(" ● RECORDING ", Style::default().fg(Color::Green).bold()),
                 Span::raw(format!(
-                    "DUDE, WHERE'S MY BATTERY?   +{:.0}s   {:.3} Wh observed",
+                    "CHEESE RECORD · WHERE'S MY BATTERY?   +{:.0}s   {:.3} Wh observed",
                     ledger.elapsed,
                     ledger.battery_j / 3600.
                 )),
@@ -285,7 +285,7 @@ pub fn draw(f: &mut Frame, ledger: &Ledger, path: &Path, view: &mut View) {
                     if p.energy_samples > 0 {
                         format!("{:.5}", p.cpu_j / 3600.)
                     } else {
-                        "—".into()
+                        "-".into()
                     },
                     format!("{:.1}", p.cpu_s),
                     format!("{:.0}", p.wakeups),
@@ -401,7 +401,7 @@ pub fn draw(f: &mut Frame, ledger: &Ledger, path: &Path, view: &mut View) {
                 Constraint::Length(10),
             ],
             body,
-            " Now · sorted by CPU energy · VM children show active guest CPU (idle <1% collapsed) · — unavailable ",
+            " Now · sorted by CPU energy · VM children show active guest CPU (idle <1% collapsed) · - unavailable ",
         )
     };
     // TableState is what makes ratatui keep the selected row visible. Keep
@@ -428,7 +428,7 @@ pub fn draw(f: &mut Frame, ledger: &Ledger, path: &Path, view: &mut View) {
             detail.push(Line::from(clean(
                 p.executable.as_deref().unwrap_or("Executable unavailable"),
             )));
-            detail.push(Line::from(format!("Inspect: ./battery inspect {}", p.pid)));
+            detail.push(Line::from(format!("Inspect: ./cheese inspect {}", p.pid)));
         }
     } else {
         if let Some(c) = ledger.comparisons.last() {
@@ -652,8 +652,8 @@ fn draw_vm(f: &mut Frame, ledger: &Ledger, path: &Path, view: &mut View) {
             details.push(Line::from(clean(&format!(
                 "Image: {} · Compose: {} / {}",
                 c.image,
-                c.project.as_deref().unwrap_or("—"),
-                c.service.as_deref().unwrap_or("—")
+                c.project.as_deref().unwrap_or("-"),
+                c.service.as_deref().unwrap_or("-")
             ))));
             details.push(Line::from(format!(
                 "Network: {} · disk: {} (lifetime I/O totals)",

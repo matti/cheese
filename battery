@@ -1,7 +1,2 @@
 #!/bin/sh
-set -eu
-cd "$(dirname "$0")"
-if [ ! -x target/release/battery ] || [ -n "$(find src Cargo.toml Cargo.lock -type f -newer target/release/battery 2>/dev/null)" ]; then
-    cargo build --release
-fi
-exec target/release/battery "$@"
+exec "$(dirname "$0")/cheese" "$@"

@@ -45,12 +45,14 @@ const PROC_PIDTASKINFO: libc::c_int = 4;
 const CTL_KERN: libc::c_int = 1;
 const KERN_PROC: libc::c_int = 14;
 const KERN_PROC_ALL: libc::c_int = 0;
+const KERN_PROC_PID: libc::c_int = 1;
 const KERN_PROCARGS2: libc::c_int = 49;
 
 // `kinfo_proc` field byte-offsets, taken from the compiler on this machine via
 // `offsetof` (sizeof = 648). Parsing by offset avoids transcribing the entire
 // fragile struct (which embeds many pointer-sized members and sub-structs).
 const KINFO_PROC_SIZE: usize = 648;
+const OFF_P_STARTTIME: usize = 0; // kp_proc.p_un.__p_starttime (struct timeval)
 const OFF_P_PID: usize = 40; // kp_proc.p_pid            (pid_t / i32)
 const OFF_P_COMM: usize = 243; // kp_proc.p_comm         (char[MAXCOMLEN+1] = 17)
 const OFF_CR_UID: usize = 420; // kp_eproc.e_ucred.cr_uid (uid_t / u32)
@@ -174,42 +176,13 @@ struct ProcEntry {
 /// Enumerate every process on the system via `sysctl KERN_PROC_ALL`, reading
 /// pid / ppid / uid / comm by verified byte-offset. Sudoless and cross-uid.
 fn list_all_procs() -> Vec<ProcEntry> {
-    let mut mib = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0];
-    let mut len: libc::size_t = 0;
-
-    // First call: query the buffer size.
-    let rc = unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            3,
-            std::ptr::null_mut(),
-            &mut len,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if rc != 0 || len == 0 {
-        return Vec::new();
-    }
-
     // Over-allocate slightly; the table can grow between the two calls.
-    len += KINFO_PROC_SIZE * 16;
-    let mut buf = vec![0u8; len];
-    let rc = unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            3,
-            buf.as_mut_ptr() as *mut libc::c_void,
-            &mut len,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if rc != 0 {
+    let Some(buf) = sysctl_mib(
+        &mut [CTL_KERN, KERN_PROC, KERN_PROC_ALL],
+        KINFO_PROC_SIZE * 16,
+    ) else {
         return Vec::new();
-    }
-    buf.truncate(len);
-
+    };
     let n = buf.len() / KINFO_PROC_SIZE;
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
@@ -301,43 +274,105 @@ fn resolve_name(pid: i32, comm: &str) -> String {
 /// The invoked exec path (argv exec_path) via `sysctl KERN_PROCARGS2`. Returns
 /// `None` for processes we may not inspect (other-uid) - that's expected.
 fn procargs_exec_path(pid: i32) -> Option<String> {
-    let mut mib = [CTL_KERN, KERN_PROCARGS2, pid];
+    procargs(pid).map(|(exec_path, _)| exec_path)
+}
+
+/// Command-line arguments (argv) of a same-uid process. `None` when access is
+/// denied (other-uid) or the process exited.
+pub fn process_args(pid: i32) -> Option<Vec<String>> {
+    procargs(pid).map(|(_, argv)| argv)
+}
+
+/// Raw `sysctl KERN_PROCARGS2` read, split into exec path and argv.
+fn procargs(pid: i32) -> Option<(String, Vec<String>)> {
+    sysctl_mib(&mut [CTL_KERN, KERN_PROCARGS2, pid], 0)
+        .filter(|buf| buf.len() >= 4)
+        .and_then(|buf| parse_procargs(&buf))
+}
+
+/// Size-then-read `sysctl` for a variable-length MIB value. `slack` extra bytes
+/// absorb growth between the two calls.
+fn sysctl_mib(mib: &mut [libc::c_int], slack: usize) -> Option<Vec<u8>> {
     let mut len: libc::size_t = 0;
+    // SAFETY: a null buffer asks the kernel for the required length.
     let rc = unsafe {
         libc::sysctl(
             mib.as_mut_ptr(),
-            3,
+            mib.len() as libc::c_uint,
             std::ptr::null_mut(),
             &mut len,
             std::ptr::null_mut(),
             0,
         )
     };
-    if rc != 0 || len < 4 {
+    if rc != 0 || len == 0 {
         return None;
     }
+    len += slack;
     let mut buf = vec![0u8; len];
+    // SAFETY: buf holds `len` bytes; the kernel writes at most that many.
     let rc = unsafe {
         libc::sysctl(
             mib.as_mut_ptr(),
-            3,
+            mib.len() as libc::c_uint,
             buf.as_mut_ptr() as *mut libc::c_void,
             &mut len,
             std::ptr::null_mut(),
             0,
         )
     };
-    if rc != 0 || len < 4 {
+    if rc != 0 {
         return None;
     }
     buf.truncate(len);
-    // Layout: int32 argc, then NUL-terminated exec_path, then argv strings.
-    let exec_path = read_cstr(&buf[4..]);
+    Some(buf)
+}
+
+/// Layout: int32 argc, NUL-terminated exec_path, NUL padding, then argc
+/// NUL-terminated argv strings (followed by the environment, ignored here).
+fn parse_procargs(buf: &[u8]) -> Option<(String, Vec<String>)> {
+    let argc = usize::try_from(read_i32(buf.get(..4)?, 0)).ok()?;
+    let rest = &buf[4..];
+    let exec_path = read_cstr(rest);
     if exec_path.is_empty() {
-        None
-    } else {
-        Some(exec_path)
+        return None;
     }
+    let mut pos = exec_path.len();
+    while rest.get(pos) == Some(&0) {
+        pos += 1;
+    }
+    let argv = rest[pos.min(rest.len())..]
+        .split(|b| *b == 0)
+        .take(argc)
+        // A process that rewrote its title (npm, postgres) leaves empty slots.
+        .filter(|a| !a.is_empty())
+        .map(|a| String::from_utf8_lossy(a).into_owned())
+        .collect();
+    Some((exec_path, argv))
+}
+
+/// Wall-clock start time (Unix seconds) of any process, cross-uid, from
+/// `kinfo_proc.kp_proc.p_starttime` via `sysctl KERN_PROC_PID`.
+pub fn started_at(pid: i32) -> Option<f64> {
+    let mut mib = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid];
+    let mut buf = vec![0u8; KINFO_PROC_SIZE];
+    let mut len: libc::size_t = buf.len();
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || len < KINFO_PROC_SIZE || read_i32(&buf, OFF_P_PID) != pid {
+        return None;
+    }
+    let seconds = i64::from_ne_bytes(buf[OFF_P_STARTTIME..OFF_P_STARTTIME + 8].try_into().ok()?);
+    let micros = read_i32(&buf, OFF_P_STARTTIME + 8);
+    (seconds > 0).then(|| seconds as f64 + micros as f64 / 1e6)
 }
 
 // ---------------------------------------------------------------------------
@@ -499,4 +534,32 @@ impl ProcSampler for ProcRusageSampler {
 /// Stable process birth counter for probes that can outlive a PID.
 pub fn process_start(pid: i32) -> Option<u64> {
     read_rusage_v6(pid).map(|r| r.ri_proc_start_abstime)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn procargs_splits_exec_path_padding_and_argv_without_environment() {
+        let mut buf = 3i32.to_ne_bytes().to_vec();
+        buf.extend_from_slice(b"/usr/bin/node\0\0\0node\0test.js\0--workers=4\0HOME=/x\0");
+        let (exec, argv) = parse_procargs(&buf).unwrap();
+        assert_eq!(exec, "/usr/bin/node");
+        assert_eq!(argv, ["node", "test.js", "--workers=4"]);
+        let mut retitled = 3i32.to_ne_bytes().to_vec();
+        retitled.extend_from_slice(b"/bin/node\0\0npm exec vite\0\0\0\0\0HOME=/x\0");
+        assert_eq!(parse_procargs(&retitled).unwrap().1, ["npm exec vite"]);
+        assert!(parse_procargs(&[1, 0]).is_none());
+    }
+    #[test]
+    fn own_start_time_is_in_the_recent_past() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let start = started_at(std::process::id() as i32).unwrap();
+        assert!(start <= now && now - start < 3600., "{start} vs {now}");
+        let argv = process_args(std::process::id() as i32).unwrap();
+        assert!(!argv.is_empty());
+    }
 }

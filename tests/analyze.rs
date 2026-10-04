@@ -10,7 +10,7 @@ struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "battery wtf test {} {}",
+            "cheese test {} {}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -53,14 +53,14 @@ exit "${CLAUDE_EXIT:-0}"
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_battery"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cheese"));
         command
             .current_dir(&self.0)
             .env("PATH", &self.0)
             .env("XDG_CONFIG_HOME", &self.0)
             .env_remove("CODEX_HOME")
             .env_remove("CLAUDE_CONFIG_DIR")
-            .args(["--dir", "evidence with spaces", "wtf"]);
+            .args(["--dir", "evidence with spaces"]);
         for key in [
             "OPENAI_API_KEY",
             "CODEX_API_KEY",
@@ -95,9 +95,9 @@ fn codex_uses_subscription_profile_and_five_second_evidence() {
     let f = Fixture::new();
     f.mock("codex");
     f.mock("claude");
-    fs::create_dir(f.0.join("battery")).unwrap();
+    fs::create_dir(f.0.join("cheese")).unwrap();
     fs::write(
-        f.0.join("battery/config.json"),
+        f.0.join("cheese/config.json"),
         r#"{"codex_home":"/test/profile with spaces"}"#,
     )
     .unwrap();
@@ -146,6 +146,31 @@ fn codex_uses_subscription_profile_and_five_second_evidence() {
             .unwrap()
             > 0
     );
+    assert!(evidence["system"]["load"]["logical_cpus"].as_u64().unwrap() > 0);
+    assert!(evidence["system"]["memory"]["swap_total_gb"].is_number());
+    assert!(evidence["system"]["memory"]["window_s"].as_f64().unwrap() >= 5.);
+    assert!(
+        evidence["headline"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("LOAD: ")
+    );
+    assert!(evidence["origin_groups"].is_array());
+    assert!(evidence["detached_processes"].is_array());
+    assert!(prompt.contains("origin_groups"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cheese: LOAD: "));
+}
+
+#[test]
+fn diagnosis_flags_conflict_with_other_subcommands() {
+    let f = Fixture::new();
+    let out = f
+        .command()
+        .args(["--seconds", "3", "sessions"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(!f.0.join("evidence with spaces").exists());
 }
 
 #[test]
@@ -156,7 +181,7 @@ fn failed_codex_reuses_exact_prompt_with_claude() {
     let out = f
         .command()
         .env("CODEX_EXIT", "17")
-        .args(["--seconds", "2"])
+        .args(["wtf", "--seconds", "2"])
         .output()
         .unwrap();
     assert!(

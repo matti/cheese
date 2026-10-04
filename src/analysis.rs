@@ -97,13 +97,14 @@ pub struct Ledger {
 }
 
 pub fn group(p: &ProcRow) -> String {
-    if let Some(path) = &p.executable
-        && let Some(end) = path.find(".app/")
-    {
-        let app = &path[..end];
-        return app.rsplit('/').next().unwrap_or(app).to_string();
-    }
-    p.name.clone()
+    p.executable
+        .as_deref()
+        .and_then(crate::samplers::procname::app_bundle)
+        .map(|app| {
+            let name = app.rsplit('/').next().unwrap_or(app);
+            name.strip_suffix(".app").unwrap_or(name).to_string()
+        })
+        .unwrap_or_else(|| p.name.clone())
 }
 
 pub fn discharge(sample: &Sample) -> Option<f64> {
@@ -314,7 +315,7 @@ impl Ledger {
                 if c.energy_samples > 0 {
                     format!("{:.5}", c.cpu_j / 3600.)
                 } else {
-                    "—".into()
+                    "-".into()
                 },
                 c.cpu_s,
                 c.wakeups
@@ -344,5 +345,5 @@ impl Ledger {
     }
 }
 pub fn number(n: Option<f64>) -> String {
-    n.map(|n| format!("{n:.1}")).unwrap_or_else(|| "—".into())
+    n.map(|n| format!("{n:.1}")).unwrap_or_else(|| "-".into())
 }

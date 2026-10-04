@@ -185,6 +185,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
+name = "cheese"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "core-foundation-sys",
+ "flate2",
+ "io-kit-sys",
+ "libc",
+ "mach2",
+ "ratatui",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -415,21 +430,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
-]
-
-[[package]]
-name = "dude-wheres-my-battery"
-version = "0.1.0"
-dependencies = [
- "clap",
- "core-foundation-sys",
- "flate2",
- "io-kit-sys",
- "libc",
- "mach2",
- "ratatui",
- "serde",
- "serde_json",
 ]
 
 [[package]]

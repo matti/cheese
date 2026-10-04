@@ -1,12 +1,12 @@
 [package]
-name = "dude-wheres-my-battery"
+name = "cheese"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Record battery drain, find sustained CPU consumers, and compare changes on macOS"
+description = "Why is my Mac slow, hot or draining battery? Diagnose load, memory pressure and runaway processes, and record battery drain on Apple Silicon macOS"
 
 [[bin]]
-name = "battery"
+name = "cheese"
 path = "src/main.rs"
 
 [dependencies]

@@ -349,8 +349,8 @@ impl Inspection {
                     c.name,
                     c.memory,
                     c.image,
-                    c.project.as_deref().unwrap_or("—"),
-                    c.service.as_deref().unwrap_or("—")
+                    c.project.as_deref().unwrap_or("-"),
+                    c.service.as_deref().unwrap_or("-")
                 );
             }
             if cs.is_empty() {

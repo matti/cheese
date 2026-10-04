@@ -130,7 +130,7 @@ fn session_cpu_energy_does_not_include_process_lifetime() {
 #[test]
 fn recording_roundtrip_and_interrupted_trailer() {
     let dir = std::env::temp_dir().join(format!(
-        "battery-test-{}-{}",
+        "cheese-test-{}-{}",
         std::process::id(),
         record::now()
     ));

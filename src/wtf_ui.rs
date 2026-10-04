@@ -1,5 +1,9 @@
 //! A small inline dashboard; backend chatter never reaches the terminal.
-use crate::{STOP, types::Sample};
+use crate::{
+    STOP,
+    signals::{Headline, Level},
+    types::Sample,
+};
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
@@ -20,6 +24,8 @@ const PURPLE: Color = Color::Rgb(192, 132, 252);
 const MUTED: Color = Color::Rgb(148, 163, 184);
 const GOLD: Color = Color::Rgb(251, 191, 36);
 const WHITE: Color = Color::Rgb(226, 232, 240);
+/// Rows reserved for system signals (load, memory, power, origins, orphans).
+const SIGNAL_ROWS: u16 = 5;
 
 #[derive(Default)]
 struct Metrics {
@@ -38,6 +44,7 @@ pub struct Progress {
     phase: u8,
     message: String,
     metrics: Metrics,
+    signals: Vec<Headline>,
 }
 
 impl Progress {
@@ -50,7 +57,7 @@ impl Progress {
             Some(Terminal::with_options(
                 CrosstermBackend::new(io::stderr()),
                 TerminalOptions {
-                    viewport: Viewport::Inline(11),
+                    viewport: Viewport::Inline(12 + SIGNAL_ROWS),
                 },
             )?)
         } else {
@@ -64,6 +71,7 @@ impl Progress {
             phase: 0,
             message: String::new(),
             metrics: Metrics::default(),
+            signals: Vec::new(),
         };
         ui.status(0, "Checking sign-in")?;
         Ok(ui)
@@ -76,7 +84,7 @@ impl Progress {
         self.phase = phase;
         self.message = message.into();
         if self.terminal.is_none() {
-            eprintln!("battery: {message}");
+            eprintln!("cheese: {message}");
         }
         self.draw()
     }
@@ -102,6 +110,12 @@ impl Progress {
                 "ON BATTERY"
             };
         }
+        self.draw()
+    }
+
+    /// Replace the system signal lines (load, memory, origins...).
+    pub fn signals(&mut self, lines: Vec<Headline>) -> io::Result<()> {
+        self.signals = lines;
         self.draw()
     }
 
@@ -134,6 +148,7 @@ impl Progress {
                 Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Length(3),
+                Constraint::Length(SIGNAL_ROWS + 1),
                 Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Length(1),
@@ -141,6 +156,7 @@ impl Progress {
             .split(inner);
             frame.render_widget(Paragraph::new(brand(false)), rows[0]);
             render_metrics(&self.metrics, rows[2], frame.buffer_mut());
+            frame.render_widget(Paragraph::new(signal_lines(&self.signals)), rows[3]);
             let steps = Line::from(vec![
                 Span::styled(
                     " 01 MEASURE ",
@@ -157,7 +173,7 @@ impl Progress {
                     style(if self.phase == 3 { PURPLE } else { MUTED }),
                 ),
             ]);
-            frame.render_widget(Paragraph::new(steps), rows[3]);
+            frame.render_widget(Paragraph::new(steps), rows[4]);
             let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
                 [(elapsed.as_millis() / 100 % 10) as usize];
             frame.render_widget(
@@ -166,7 +182,7 @@ impl Progress {
                     Span::styled(self.message.clone(), style(WHITE)),
                     Span::styled(format!("   {} s", elapsed.as_secs()), style(MUTED)),
                 ])),
-                rows[4],
+                rows[5],
             );
             let ratio = match self.phase {
                 0 => 0.,
@@ -179,7 +195,7 @@ impl Progress {
                     .filled_style(style(CYAN))
                     .unfilled_style(style(Color::DarkGray))
                     .label(format!("{} s sample", self.seconds)),
-                rows[5],
+                rows[6],
             );
         })?;
         Ok(())
@@ -187,12 +203,17 @@ impl Progress {
 
     pub fn finish(&mut self, answer: &str, provider: &str) -> io::Result<()> {
         let Some(terminal) = &mut self.terminal else {
+            for line in &self.signals {
+                eprintln!("cheese: {line}");
+            }
             println!("{}", answer.trim());
             return Ok(());
         };
         let width = terminal.size()?.width;
         let lines = report_lines(answer, width.saturating_sub(6).max(1) as usize);
-        let height = (lines.len() + 10).min(u16::MAX as usize) as u16;
+        let signals = signal_lines(&self.signals);
+        let answer_y = 6 + signals.len() as u16 + u16::from(!signals.is_empty());
+        let height = (lines.len() + 4 + answer_y as usize).min(u16::MAX as usize) as u16;
         let footer = format!(
             " {provider} · {} s sample · {} s total",
             self.seconds,
@@ -209,12 +230,16 @@ impl Progress {
                 Rect::new(inner.x, inner.y + 2, inner.width, 3),
                 buffer,
             );
+            Paragraph::new(signals).render(
+                Rect::new(inner.x, inner.y + 6, inner.width, answer_y - 6),
+                buffer,
+            );
             Paragraph::new(lines).render(
                 Rect::new(
                     inner.x + 1,
-                    inner.y + 6,
+                    inner.y + answer_y,
                     inner.width.saturating_sub(2),
-                    height.saturating_sub(9),
+                    height.saturating_sub(answer_y + 3),
                 ),
                 buffer,
             );
@@ -250,29 +275,42 @@ fn panel(title: &'static str) -> Block<'static> {
 fn brand(done: bool) -> Line<'static> {
     Line::from(vec![
         Span::styled(" ▰▰▰ ", style(CYAN)),
-        Span::styled("BATTERY", style(WHITE).add_modifier(Modifier::BOLD)),
+        Span::styled("CHEESE", style(WHITE).add_modifier(Modifier::BOLD)),
         Span::styled(" / WTF", style(PURPLE).add_modifier(Modifier::BOLD)),
         Span::styled(
             if done {
                 "   ✓ DONE"
             } else {
-                "   WHAT'S RUNNING HOT?"
+                "   WHY IS MY MAC CHEESED?"
             },
             style(if done { CYAN } else { MUTED }),
         ),
     ])
 }
+fn signal_lines(signals: &[Headline]) -> Vec<Line<'static>> {
+    signals
+        .iter()
+        .take(SIGNAL_ROWS as usize)
+        .map(|h| {
+            let color = if h.level == Level::Warn { GOLD } else { WHITE };
+            Line::from(vec![
+                Span::styled(format!(" {:<8}", h.label), style(MUTED)),
+                Span::styled(h.text.clone(), style(color)),
+            ])
+        })
+        .collect()
+}
 fn render_metrics(metrics: &Metrics, area: Rect, buffer: &mut Buffer) {
     let cells = Layout::horizontal([Constraint::Ratio(1, 3); 3]).split(area);
     let cpu = metrics
         .cpu
-        .map_or("—".into(), |(a, b)| format!("{a:.0}–{b:.0} °C"));
+        .map_or("-".into(), |(a, b)| format!("{a:.0}-{b:.0} °C"));
     let watts = if metrics.watt_samples > 0 {
         format!("{:.0} W", metrics.watts / metrics.watt_samples as f64)
     } else {
-        "—".into()
+        "-".into()
     };
-    let battery = metrics.battery.map_or("—".into(), |b| format!("{b:.0} %"));
+    let battery = metrics.battery.map_or("-".into(), |b| format!("{b:.0} %"));
     let heat_color = if metrics.cpu.is_some_and(|(_, hi)| hi >= 90.) {
         GOLD
     } else {

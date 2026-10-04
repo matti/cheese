@@ -21,14 +21,20 @@ impl Assistants {
         let root = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".config")));
-        let Some(root) = root else {
-            return Ok(Self::default());
-        };
-        match std::fs::read(root.join("battery/config.json")) {
-            Ok(data) => serde_json::from_slice(&data).map_err(io::Error::other),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e),
+        root.map_or(Ok(Self::default()), |root| Self::load(&root))
+    }
+
+    /// `cheese/config.json` under the config root, else the pre-rename
+    /// `battery/config.json`, else defaults.
+    fn load(root: &Path) -> io::Result<Self> {
+        for dir in ["cheese", "battery"] {
+            match std::fs::read(root.join(dir).join("config.json")) {
+                Ok(data) => return serde_json::from_slice(&data).map_err(io::Error::other),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
         }
+        Ok(Self::default())
     }
 
     fn codex(&self) -> Command {
@@ -121,7 +127,7 @@ impl Assistants {
             return Ok(());
         }
         Err(io::Error::other(
-            "No working subscription login. Check `codex login status` or `klaude auth status` (plain `claude auth status` if klaude is not installed). Custom profiles can be set in ~/.config/battery/config.json.",
+            "No working subscription login. Check `codex login status` or `klaude auth status` (plain `claude auth status` if klaude is not installed). Custom profiles can be set in ~/.config/cheese/config.json.",
         ))
     }
 
@@ -247,4 +253,33 @@ fn run(
         )));
     }
     Ok(answer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn config_prefers_cheese_and_falls_back_to_legacy_battery_dir() {
+        let root = std::env::temp_dir().join(format!("cheese-config-{}", std::process::id()));
+        let write = |dir: &str, home: &str| {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(
+                root.join(dir).join("config.json"),
+                format!(r#"{{"codex_home":"{home}"}}"#),
+            )
+            .unwrap();
+        };
+        assert!(Assistants::load(&root).unwrap().codex_home.is_none());
+        write("battery", "/legacy");
+        assert_eq!(
+            Assistants::load(&root).unwrap().codex_home,
+            Some("/legacy".into())
+        );
+        write("cheese", "/new");
+        assert_eq!(
+            Assistants::load(&root).unwrap().codex_home,
+            Some("/new".into())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
