@@ -2,7 +2,7 @@
 //! and power context. Native sysctl/mach reads only; nothing is shelled out.
 use crate::{
     host::{sysctl_string, sysctl_value},
-    types::{BatteryFrame, Sample, ThermalFrame},
+    types::{BatteryFrame, BatteryState, Sample, ThermalFrame},
 };
 use serde::Serialize;
 
@@ -194,10 +194,17 @@ pub fn memory_verdict(
 #[derive(Serialize, Clone, Debug)]
 pub struct Power {
     pub source: &'static str,
-    pub charging: bool,
+    /// Authoritative charge direction, derived from the measured mean pack power
+    /// (`battery_w`), not from macOS' charging flag.
+    pub battery_state: BatteryState,
     pub battery_percent: f64,
     /// Mean pack power over the window: positive charges the battery, negative drains it.
     pub battery_w: f64,
+    /// Rated power of the connected adapter (AdapterDetails.Watts), if known.
+    pub adapter_watts: Option<f64>,
+    /// Raw macOS IsCharging flag (also behind pmset's "charging"). It can stay
+    /// true while the pack measurably drains; `battery_state` wins.
+    pub macos_is_charging_flag: bool,
     pub time_remaining_min: Option<i64>,
     pub thermal_pressure: Option<String>,
     pub hottest_cpu_c: Option<f64>,
@@ -229,20 +236,23 @@ impl PowerWindow {
     pub fn summary(&self) -> Option<Power> {
         let b = self.battery.as_ref()?;
         let battery_w = mean(&self.pack_w)?;
+        let battery_state = BatteryState::derive(b.external_connected, b.soc_percent, battery_w);
         Some(Power {
             source: if b.external_connected {
                 "AC"
             } else {
                 "battery"
             },
-            charging: b.is_charging,
+            battery_state,
             battery_percent: b.soc_percent,
             battery_w,
+            adapter_watts: b.adapter_watts,
+            macos_is_charging_flag: b.is_charging,
             time_remaining_min: b.time_remaining_min,
             thermal_pressure: self.thermal.as_ref().map(|t| t.pressure.label()),
             hottest_cpu_c: self.thermal.as_ref().and_then(|t| t.cpu_die_max_c),
             smc_system_w: mean(&self.smc_w),
-            note: power_note(b, battery_w),
+            note: power_note(battery_state, b.soc_percent, battery_w, b.adapter_watts),
         })
     }
 }
@@ -253,25 +263,34 @@ fn mean(values: &[f64]) -> Option<f64> {
 
 /// One-line reading of the power situation, e.g. a low battery on AC that
 /// barely charges because the load consumes most of the adapter's power.
-pub fn power_note(b: &BatteryFrame, pack_w: f64) -> String {
-    let soc = b.soc_percent;
-    if !b.external_connected {
-        format!("on battery at {soc:.0}%, draining {:.1} W", -pack_w)
-    } else if pack_w < -0.5 {
-        format!(
-            "on AC but still draining {:.1} W at {soc:.0}%: the adapter cannot cover the load",
-            -pack_w
-        )
-    } else if b.is_charging && soc < 80. && pack_w < 15. {
-        format!(
+pub fn power_note(
+    state: BatteryState,
+    soc: f64,
+    pack_w: f64,
+    adapter_watts: Option<f64>,
+) -> String {
+    match state {
+        BatteryState::DrainingOnBattery => {
+            format!("on battery at {soc:.0}%, draining {:.1} W", -pack_w)
+        }
+        BatteryState::DrainingOnAc => match adapter_watts {
+            Some(a) => format!(
+                "on AC but still draining {:.1} W at {soc:.0}%: the {a:.0} W adapter cannot cover the load; use a higher-wattage charger",
+                -pack_w
+            ),
+            None => format!(
+                "on AC but still draining {:.1} W at {soc:.0}%: the adapter cannot cover the load",
+                -pack_w
+            ),
+        },
+        BatteryState::Charging if soc < 80. && pack_w < 15. => format!(
             "on AC but battery {soc:.0}% and charging slowly ({pack_w:.1} W into the pack); load may be using most of the adapter's power"
-        )
-    } else if b.is_charging {
-        format!("on AC, charging at {pack_w:.1} W ({soc:.0}%)")
-    } else if soc < 80. {
-        format!("on AC but not charging at {soc:.0}% (load, a charge limit or optimized charging)")
-    } else {
-        format!("on AC, battery {soc:.0}%")
+        ),
+        BatteryState::Charging => format!("on AC, charging at {pack_w:.1} W ({soc:.0}%)"),
+        BatteryState::NotChargingOnAc if soc < 80. => format!(
+            "on AC but not charging at {soc:.0}% (load, a charge limit or optimized charging)"
+        ),
+        BatteryState::NotChargingOnAc | BatteryState::Full => format!("on AC, battery {soc:.0}%"),
     }
 }
 
@@ -303,25 +322,62 @@ mod tests {
         assert_eq!(memory_verdict(None, None, None), "unknown");
     }
 
-    fn battery(soc: f64, ac: bool, charging: bool) -> BatteryFrame {
-        BatteryFrame {
-            soc_percent: soc,
-            external_connected: ac,
-            is_charging: charging,
-            ..Default::default()
-        }
+    fn note(soc: f64, ac: bool, pack_w: f64, adapter: Option<f64>) -> String {
+        power_note(BatteryState::derive(ac, soc, pack_w), soc, pack_w, adapter)
+    }
+
+    #[test]
+    fn battery_state_follows_measured_pack_power() {
+        use BatteryState::*;
+        assert_eq!(BatteryState::derive(true, 44., -60.5), DrainingOnAc);
+        assert_eq!(BatteryState::derive(true, 44., 20.), Charging);
+        assert_eq!(BatteryState::derive(false, 44., -12.), DrainingOnBattery);
+        assert_eq!(BatteryState::derive(false, 100., 0.), DrainingOnBattery);
+        assert_eq!(BatteryState::derive(true, 100., 0.1), Full);
+        assert_eq!(BatteryState::derive(true, 60., -0.2), NotChargingOnAc);
+        let json = serde_json::to_value(DrainingOnAc).unwrap();
+        assert_eq!(json, "draining_on_ac");
     }
 
     #[test]
     fn power_notes_explain_ac_and_charging_state() {
-        assert!(power_note(&battery(8., true, true), 4.).contains("charging slowly"));
-        assert!(power_note(&battery(8., true, false), -3.).contains("still draining 3.0 W"));
-        assert!(power_note(&battery(50., false, false), -12.).starts_with("on battery at 50%"));
-        assert!(power_note(&battery(60., true, false), 0.).contains("not charging"));
+        assert!(note(8., true, 4., None).contains("charging slowly"));
+        assert!(note(8., true, -3., None).contains("still draining 3.0 W"));
         assert_eq!(
-            power_note(&battery(100., true, false), 0.),
-            "on AC, battery 100%"
+            note(44., true, -58., Some(60.)),
+            "on AC but still draining 58.0 W at 44%: the 60 W adapter cannot cover the load; use a higher-wattage charger"
         );
+        assert!(note(50., false, -12., None).starts_with("on battery at 50%"));
+        assert!(note(60., true, 0., None).contains("not charging"));
+        assert_eq!(note(100., true, 0., None), "on AC, battery 100%");
+    }
+
+    #[test]
+    fn summary_reports_measured_drain_over_charging_flag() {
+        let mut window = PowerWindow::default();
+        window.observe(&Sample {
+            battery: Some(BatteryFrame {
+                system_power_mw: -58_000.,
+                soc_percent: 44.,
+                is_charging: true,
+                external_connected: true,
+                adapter_watts: Some(60.),
+                ..Default::default()
+            }),
+            dt: std::time::Duration::from_secs(1),
+            soc: None,
+            thermal: None,
+            gpu: None,
+            io: None,
+            procs: vec![],
+        });
+        let p = window.summary().unwrap();
+        assert_eq!(p.battery_state, BatteryState::DrainingOnAc);
+        assert!(p.macos_is_charging_flag);
+        let json = serde_json::to_value(&p).unwrap();
+        assert!(json.get("charging").is_none());
+        assert_eq!(json["battery_state"], "draining_on_ac");
+        assert_eq!(json["adapter_watts"], 60.);
     }
 
     #[test]

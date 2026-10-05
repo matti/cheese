@@ -39,8 +39,13 @@ It samples for 5 seconds and collects, using native sysctl/mach/libproc reads:
   sample window (`host_statistics64`). Verdict: critical/warning from the
   kernel, else swapping (pages swapped during the window), else heavily
   compressed (compressor at least 25% of RAM), else normal.
-- **Power**: AC or battery, charge level, mean pack power, thermal pressure and
-  a one-line note, e.g. "on AC but battery 8% and charging slowly".
+- **Power**: AC or battery, charge level, mean pack power, adapter watts,
+  thermal pressure, hottest CPU die temperature and a one-line note, e.g. "on AC
+  but battery 8% and charging slowly". `battery_state` (charging,
+  draining_on_ac, draining_on_battery, full, not_charging_on_ac) comes from the
+  measured pack current. macOS' `IsCharging` flag (and pmset's "charging") can
+  stay set while a heavy load drains the pack through an undersized adapter, so
+  it is kept only as the raw `macos_is_charging_flag`.
 - **Origin groups**: every process is attributed to the command a person or
   agent launched, so "16 chrome processes" becomes "1 playwright test run".
   From each process the parent chain is climbed and stops below the first

@@ -102,13 +102,7 @@ impl Progress {
         }
         if let Some(b) = &sample.battery {
             self.metrics.battery = Some(b.soc_percent);
-            self.metrics.power = if b.is_charging {
-                "CHARGING"
-            } else if b.external_connected {
-                "AC POWER"
-            } else {
-                "ON BATTERY"
-            };
+            self.metrics.power = b.state().label();
         }
         self.draw()
     }

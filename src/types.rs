@@ -25,10 +25,73 @@ pub struct BatteryFrame {
     pub temperature_c: f64,
     /// Gauge estimate of time-to-empty / time-to-full in minutes, if known.
     pub time_remaining_min: Option<i64>,
-    /// True if the pack is actively charging.
+    /// Raw macOS `IsCharging` flag. It can stay set while the pack measurably
+    /// discharges because the load exceeds the adapter, so it is not the charge
+    /// direction: use [`BatteryFrame::state`] / [`BatteryState`] for that.
+    #[serde(rename = "macos_is_charging_flag", alias = "is_charging")]
     pub is_charging: bool,
     /// True if an external power source (wall adapter) is connected.
     pub external_connected: bool,
+    /// Rated adapter power from `AdapterDetails.Watts`, when an adapter is connected.
+    #[serde(default)]
+    pub adapter_watts: Option<f64>,
+}
+
+impl BatteryFrame {
+    /// Charge direction from this frame's instantaneous measured pack power.
+    pub fn state(&self) -> BatteryState {
+        BatteryState::derive(
+            self.external_connected,
+            self.soc_percent,
+            self.system_power_mw / 1000.,
+        )
+    }
+}
+
+/// Authoritative battery state, derived from the measured pack current rather
+/// than macOS' `IsCharging` flag.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BatteryState {
+    Charging,
+    /// External power is connected but the load still pulls from the pack.
+    DrainingOnAc,
+    DrainingOnBattery,
+    /// On external power, (near) zero pack current and nearly full.
+    Full,
+    /// On external power, (near) zero pack current below full: load, a charge
+    /// limit or optimized charging is holding the level.
+    NotChargingOnAc,
+}
+
+impl BatteryState {
+    /// Pack power within this band (W) counts as neither charging nor draining.
+    const IDLE_W: f64 = 0.5;
+
+    /// `pack_w` is measured pack power: positive charges, negative drains.
+    pub fn derive(external_connected: bool, soc_percent: f64, pack_w: f64) -> Self {
+        if !external_connected {
+            Self::DrainingOnBattery
+        } else if pack_w < -Self::IDLE_W {
+            Self::DrainingOnAc
+        } else if pack_w > Self::IDLE_W {
+            Self::Charging
+        } else if soc_percent >= 95. {
+            Self::Full
+        } else {
+            Self::NotChargingOnAc
+        }
+    }
+
+    /// Short upper-case label for UI cards.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Charging => "CHARGING",
+            Self::DrainingOnAc => "DRAINING ON AC",
+            Self::DrainingOnBattery => "ON BATTERY",
+            Self::Full | Self::NotChargingOnAc => "AC POWER",
+        }
+    }
 }
 
 /// Per-process deltas over one sampling interval.

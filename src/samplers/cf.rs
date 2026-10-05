@@ -176,6 +176,67 @@ impl CFProps {
     }
 }
 
+/// A property value for building test dictionaries.
+#[cfg(test)]
+pub enum Value {
+    Int(i64),
+    Bool(bool),
+    Dict(CFProps),
+}
+
+#[cfg(test)]
+impl CFProps {
+    /// Build an owned property dictionary, as IOKit would return it.
+    pub fn from_pairs(pairs: &[(&str, Value)]) -> Self {
+        use core_foundation_sys::dictionary::{
+            CFDictionaryCreate, kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks,
+        };
+        use core_foundation_sys::number::CFNumberCreate;
+        unsafe extern "C" {
+            static kCFBooleanFalse: CFTypeRef;
+        }
+        let keys: Vec<CFTypeRef> = pairs.iter().map(|(k, _)| cfstr(k) as CFTypeRef).collect();
+        let created: Vec<Option<CFTypeRef>> = pairs
+            .iter()
+            .map(|(_, v)| match v {
+                Value::Int(n) => Some(unsafe {
+                    CFNumberCreate(
+                        kCFAllocatorDefault,
+                        kCFNumberSInt64Type,
+                        n as *const i64 as *const std::ffi::c_void,
+                    )
+                } as CFTypeRef),
+                _ => None,
+            })
+            .collect();
+        let values: Vec<CFTypeRef> = pairs
+            .iter()
+            .zip(&created)
+            .map(|((_, v), c)| match v {
+                Value::Int(_) => c.unwrap(),
+                Value::Bool(true) => unsafe { kCFBooleanTrue },
+                Value::Bool(false) => unsafe { kCFBooleanFalse },
+                Value::Dict(d) => d.dict as CFTypeRef,
+            })
+            .collect();
+        // SAFETY: the dictionary retains keys and values; release our +1 refs.
+        let dict = unsafe {
+            CFDictionaryCreate(
+                kCFAllocatorDefault,
+                keys.as_ptr() as *mut _,
+                values.as_ptr() as *mut _,
+                keys.len() as isize,
+                &kCFTypeDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks,
+            )
+        };
+        for r in keys.into_iter().chain(created.into_iter().flatten()) {
+            unsafe { CFRelease(r) };
+        }
+        Self { dict }
+    }
+}
+
 impl Drop for CFProps {
     fn drop(&mut self) {
         if !self.dict.is_null() {
